@@ -83,12 +83,15 @@ jobs:
 
       - name: Download build artifact
         uses: actions/download-artifact@v2
+        with:
+          name: k3s
+          path: ./dist/artifacts
 
       - name: Generate provenance
         # use action in the root directory
         uses: slsa-framework/github-actions-demo@v0.1
         with:
-          artifact_path: ./dist/artifacts
+          artifact_path: ./dist/artifacts/k3s
 
       - name: Upload provenance
         uses: actions/upload-artifact@v2
