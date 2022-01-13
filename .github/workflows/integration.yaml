@@ -88,7 +88,7 @@ jobs:
         # use action in the root directory
         uses: slsa-framework/github-actions-demo@v0.1
         with:
-          artifact_path: artifact/
+          artifact_path: ./dist/artifacts
 
       - name: Upload provenance
         uses: actions/upload-artifact@v2
