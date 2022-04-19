@@ -3,7 +3,7 @@ kind: Component
 metadata:
   name: k3s
   description: 
-    K3S is a lightweight and certified Kubernetes distribution built for IoT & Edge computing
+    Lightweight Kubernetes
   links:
     - title: Website
       url: https://k3s.io/
