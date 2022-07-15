@@ -5,7 +5,9 @@ on:
       - "**.md"
       - "channel.yaml"
       - "install.sh"
-      - "tests/vagrant/**"
+      - "tests/snapshotter/**"
+      - "tests/install/**"
+      - "tests/cgroup/**"
       - ".github/**"
       - "!.github/workflows/integration.yaml"
   pull_request:
@@ -13,7 +15,9 @@ on:
       - "**.md"
       - "channel.yaml"
       - "install.sh"
-      - "tests/vagrant/**"
+      - "tests/snapshotter/**"
+      - "tests/install/**"
+      - "tests/cgroup/**"
       - ".github/**"
       - "!.github/workflows/integration.yaml"
   workflow_dispatch: {}
@@ -43,7 +47,7 @@ jobs:
     - name: Install Go
       uses: actions/setup-go@v2 
       with: 
-        go-version: '1.16.5'
+        go-version: '1.18.1'
     - name: Checkout
       uses: actions/checkout@v2
       with:
@@ -56,44 +60,8 @@ jobs:
     - name: Run Integration Tests
       run: | 
         chmod +x ./dist/artifacts/k3s
-        go test -coverpkg=./... -coverprofile=coverage.out ./pkg/... -run Integration
-        go tool cover -func coverage.out
-        # these tests do not relate to coverage and must be run separately
-        go test ./tests/integration/... -run Integration 
+        sudo -E env "PATH=$PATH" go test ./tests/integration/... -run Integration
     - name: On Failure, Launch Debug Session
       if: ${{ failure() }}
       uses: mxschmitt/action-tmate@v3
       timeout-minutes: 5
-    - name: Upload Results To Codecov
-      uses: codecov/codecov-action@v1
-      with:
-        files: ./coverage.out
-        flags: inttests # optional
-        verbose: true # optional (default = false)
-        
-  # generate provenance https://github.com/slsa-framework/github-actions-demo      
-  generate-provenance:
-    needs: build
-    name: Generate build provenance
-    runs-on: ubuntu-latest
-    steps:
-      # checkout only required to run local action (defined in this repo)
-      - name: Checkout
-        uses: actions/checkout@v2
-
-      - name: Download build artifact
-        uses: actions/download-artifact@v2
-        with:
-          name: k3s
-          path: ./dist/artifacts
-
-      - name: Generate provenance
-        # use action in the root directory
-        uses: slsa-framework/github-actions-demo@v0.1
-        with:
-          artifact_path: ./dist/artifacts/k3s
-
-      - name: Upload provenance
-        uses: actions/upload-artifact@v2
-        with:
-          path: build.provenance
