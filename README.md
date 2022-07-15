@@ -33,7 +33,7 @@ K3s bundles the following technologies together into a single cohesive distribut
 * [Metrics Server](https://github.com/kubernetes-sigs/metrics-server)
 * [Traefik](https://containo.us/traefik/) for ingress
 * [Klipper-lb](https://github.com/k3s-io/klipper-lb) as an embedded service load balancer provider
-* [Kube-router](https://www.kube-router.io/) for network policy
+* [Kube-router](https://www.kube-router.io/) netpol controller for network policy
 * [Helm-controller](https://github.com/k3s-io/helm-controller) to allow for CRD-driven deployment of helm manifests
 * [Kine](https://github.com/k3s-io/kine) as a datastore shim that allows etcd to be replaced with other databases
 * [Local-path-provisioner](https://github.com/rancher/local-path-provisioner) for provisioning volumes using local storage
@@ -131,7 +131,7 @@ curl -sfL https://get.k3s.io | K3S_URL=https://myserver:6443 K3S_TOKEN=XXX sh -
 Manual Download
 ---------------
 
-1. Download `k3s` from latest [release](https://github.com/k3s-io/k3s/releases/latest), x86_64, armhf, and arm64 are supported.
+1. Download `k3s` from latest [release](https://github.com/k3s-io/k3s/releases/latest), x86_64, armhf, arm64 and s390x are supported.
 1. Run the server.
 
 ```bash

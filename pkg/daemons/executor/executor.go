@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	daemonconfig "github.com/rancher/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	daemonconfig "github.com/k3s-io/k3s/pkg/daemons/config"
 	yaml2 "gopkg.in/yaml.v2"
 	"k8s.io/apiserver/pkg/authentication/authenticator"
 	"sigs.k8s.io/yaml"
@@ -35,21 +35,22 @@ type Executor interface {
 }
 
 type ETCDConfig struct {
-	InitialOptions      `json:",inline"`
-	Name                string      `json:"name,omitempty"`
-	ListenClientURLs    string      `json:"listen-client-urls,omitempty"`
-	ListenMetricsURLs   string      `json:"listen-metrics-urls,omitempty"`
-	ListenPeerURLs      string      `json:"listen-peer-urls,omitempty"`
-	AdvertiseClientURLs string      `json:"advertise-client-urls,omitempty"`
-	DataDir             string      `json:"data-dir,omitempty"`
-	SnapshotCount       int         `json:"snapshot-count,omitempty"`
-	ServerTrust         ServerTrust `json:"client-transport-security"`
-	PeerTrust           PeerTrust   `json:"peer-transport-security"`
-	ForceNewCluster     bool        `json:"force-new-cluster,omitempty"`
-	HeartbeatInterval   int         `json:"heartbeat-interval"`
-	ElectionTimeout     int         `json:"election-timeout"`
-	Logger              string      `json:"logger"`
-	LogOutputs          []string    `json:"log-outputs"`
+	InitialOptions                  `json:",inline"`
+	Name                            string      `json:"name,omitempty"`
+	ListenClientURLs                string      `json:"listen-client-urls,omitempty"`
+	ListenMetricsURLs               string      `json:"listen-metrics-urls,omitempty"`
+	ListenPeerURLs                  string      `json:"listen-peer-urls,omitempty"`
+	AdvertiseClientURLs             string      `json:"advertise-client-urls,omitempty"`
+	DataDir                         string      `json:"data-dir,omitempty"`
+	SnapshotCount                   int         `json:"snapshot-count,omitempty"`
+	ServerTrust                     ServerTrust `json:"client-transport-security"`
+	PeerTrust                       PeerTrust   `json:"peer-transport-security"`
+	ForceNewCluster                 bool        `json:"force-new-cluster,omitempty"`
+	HeartbeatInterval               int         `json:"heartbeat-interval"`
+	ElectionTimeout                 int         `json:"election-timeout"`
+	Logger                          string      `json:"logger"`
+	LogOutputs                      []string    `json:"log-outputs"`
+	ExperimentalInitialCorruptCheck bool        `json:"experimental-initial-corrupt-check"`
 }
 
 type ServerTrust struct {

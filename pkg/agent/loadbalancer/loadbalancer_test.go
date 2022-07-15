@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rancher/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
 )
 
 type server struct {
@@ -106,7 +106,7 @@ func Test_UnitFailOver(t *testing.T) {
 		DataDir:   tmpDir,
 	}
 
-	lb, err := New(context.TODO(), cfg.DataDir, SupervisorServiceName, cfg.ServerURL, RandomPort)
+	lb, err := New(context.TODO(), cfg.DataDir, SupervisorServiceName, cfg.ServerURL, RandomPort, false)
 	if err != nil {
 		assertEqual(t, err, nil)
 	}
@@ -157,7 +157,7 @@ func Test_UnitFailFast(t *testing.T) {
 		DataDir:   tmpDir,
 	}
 
-	lb, err := New(context.TODO(), cfg.DataDir, SupervisorServiceName, cfg.ServerURL, RandomPort)
+	lb, err := New(context.TODO(), cfg.DataDir, SupervisorServiceName, cfg.ServerURL, RandomPort, false)
 	if err != nil {
 		assertEqual(t, err, nil)
 	}

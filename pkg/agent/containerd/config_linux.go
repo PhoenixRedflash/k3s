@@ -9,13 +9,14 @@ import (
 	"os"
 	"time"
 
+	"github.com/containerd/containerd"
+	"github.com/k3s-io/k3s/pkg/agent/templates"
+	util2 "github.com/k3s-io/k3s/pkg/agent/util"
+	"github.com/k3s-io/k3s/pkg/cgroups"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/opencontainers/runc/libcontainer/userns"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/agent/templates"
-	util2 "github.com/rancher/k3s/pkg/agent/util"
-	"github.com/rancher/k3s/pkg/cgroups"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/k3s/pkg/version"
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -44,20 +45,23 @@ func setupContainerdConfig(ctx context.Context, cfg *config.Node) error {
 	}
 
 	isRunningInUserNS := userns.RunningInUserNS()
-	_, _, hasCFS, hasPIDs := cgroups.CheckCgroups()
+	_, _, controllers := cgroups.CheckCgroups()
 	// "/sys/fs/cgroup" is namespaced
 	cgroupfsWritable := unix.Access("/sys/fs/cgroup", unix.W_OK) == nil
-	disableCgroup := isRunningInUserNS && (!hasCFS || !hasPIDs || !cgroupfsWritable)
+	disableCgroup := isRunningInUserNS && (!controllers["cpu"] || !controllers["pids"] || !cgroupfsWritable)
 	if disableCgroup {
 		logrus.Warn("cgroup v2 controllers are not delegated for rootless. Disabling cgroup.")
+	} else {
+		cfg.AgentConfig.Systemd = controllers["cpuset"] && os.Getenv("NOTIFY_SOCKET") != ""
 	}
 
 	var containerdTemplate string
 	containerdConfig := templates.ContainerdConfig{
 		NodeConfig:            cfg,
 		DisableCgroup:         disableCgroup,
+		SystemdCgroup:         cfg.AgentConfig.Systemd,
 		IsRunningInUserNS:     isRunningInUserNS,
-		PrivateRegistryConfig: privRegistries.Registry(),
+		PrivateRegistryConfig: privRegistries.Registry,
 		ExtraRuntimes:         findNvidiaContainerRuntimes(os.DirFS(string(os.PathSeparator))),
 	}
 
@@ -111,4 +115,13 @@ func CriConnection(ctx context.Context, address string) (*grpc.ClientConn, error
 	}
 
 	return conn, nil
+}
+
+func Client(address string) (*containerd.Client, error) {
+	addr, _, err := util.GetAddressAndDialer("unix://" + address)
+	if err != nil {
+		return nil, err
+	}
+
+	return containerd.New(addr)
 }

@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package agent
@@ -9,16 +10,14 @@ import (
 	"time"
 
 	"github.com/Microsoft/hcsshim"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 )
 
-var (
-	NetworkName string = "vxlan0"
-)
+var NetworkName = "vxlan0"
 
 func checkRuntimeEndpoint(cfg *config.Agent, argsMap map[string]string) {
 	if strings.HasPrefix(cfg.RuntimeSocket, windowsPrefix) {
@@ -29,9 +28,14 @@ func checkRuntimeEndpoint(cfg *config.Agent, argsMap map[string]string) {
 }
 
 func kubeProxyArgs(cfg *config.Agent) map[string]string {
+	bindAddress := "127.0.0.1"
+	_, IPv6only, _ := util.GetFirstString([]string{cfg.NodeIP})
+	if IPv6only {
+		bindAddress = "::1"
+	}
 	argsMap := map[string]string{
 		"proxy-mode":           "kernelspace",
-		"healthz-bind-address": "127.0.0.1",
+		"healthz-bind-address": bindAddress,
 		"kubeconfig":           cfg.KubeConfigKubeProxy,
 		"cluster-cidr":         util.JoinIPNets(cfg.ClusterCIDRs),
 	}
@@ -39,7 +43,7 @@ func kubeProxyArgs(cfg *config.Agent) map[string]string {
 		argsMap["hostname-override"] = cfg.NodeName
 	}
 
-	if sourceVip := waitForManagementIp(NetworkName); sourceVip != "" {
+	if sourceVip := waitForManagementIP(NetworkName); sourceVip != "" {
 		argsMap["source-vip"] = sourceVip
 	}
 
@@ -47,8 +51,13 @@ func kubeProxyArgs(cfg *config.Agent) map[string]string {
 }
 
 func kubeletArgs(cfg *config.Agent) map[string]string {
+	bindAddress := "127.0.0.1"
+	_, IPv6only, _ := util.GetFirstString([]string{cfg.NodeIP})
+	if IPv6only {
+		bindAddress = "::1"
+	}
 	argsMap := map[string]string{
-		"healthz-bind-address":         "127.0.0.1",
+		"healthz-bind-address":         bindAddress,
 		"read-only-port":               "0",
 		"cluster-domain":               cfg.ClusterDomain,
 		"kubeconfig":                   cfg.KubeConfigKubelet,
@@ -69,15 +78,6 @@ func kubeletArgs(cfg *config.Agent) map[string]string {
 		argsMap["root-dir"] = cfg.RootDir
 		argsMap["cert-dir"] = filepath.Join(cfg.RootDir, "pki")
 	}
-	if cfg.CNIConfDir != "" {
-		argsMap["cni-conf-dir"] = cfg.CNIConfDir
-	}
-	if cfg.CNIBinDir != "" {
-		argsMap["cni-bin-dir"] = cfg.CNIBinDir
-	}
-	if cfg.CNIPlugin {
-		argsMap["network-plugin"] = "cni"
-	}
 	if len(cfg.ClusterDNS) > 0 {
 		argsMap["cluster-dns"] = util.JoinIPs(cfg.ClusterDNSs)
 	}
@@ -85,10 +85,11 @@ func kubeletArgs(cfg *config.Agent) map[string]string {
 		argsMap["resolv-conf"] = cfg.ResolvConf
 	}
 	if cfg.RuntimeSocket != "" {
-		argsMap["container-runtime"] = "remote"
+		argsMap["containerd"] = cfg.RuntimeSocket
 		argsMap["serialize-image-pulls"] = "false"
 		checkRuntimeEndpoint(cfg, argsMap)
-	} else if cfg.PauseImage != "" {
+	}
+	if cfg.PauseImage != "" {
 		argsMap["pod-infra-container-image"] = cfg.PauseImage
 	}
 	if cfg.ListenAddress != "" {
@@ -114,6 +115,7 @@ func kubeletArgs(cfg *config.Agent) map[string]string {
 	if len(cfg.NodeTaints) > 0 {
 		argsMap["register-with-taints"] = strings.Join(cfg.NodeTaints, ",")
 	}
+
 	if !cfg.DisableCCM {
 		argsMap["cloud-provider"] = "external"
 	}
@@ -131,7 +133,7 @@ func kubeletArgs(cfg *config.Agent) map[string]string {
 	return argsMap
 }
 
-func waitForManagementIp(networkName string) string {
+func waitForManagementIP(networkName string) string {
 	for range time.Tick(time.Second * 5) {
 		network, err := hcsshim.GetHNSNetworkByName(networkName)
 		if err != nil {

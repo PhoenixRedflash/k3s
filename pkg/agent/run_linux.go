@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 package agent
@@ -7,12 +8,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	"github.com/rancher/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 )
 
 const (
-	dockershimSock = "unix:///var/run/dockershim.sock"
 	containerdSock = "unix:///run/k3s/containerd/containerd.sock"
 )
 
@@ -21,12 +21,7 @@ const (
 func setupCriCtlConfig(cfg cmds.Agent, nodeConfig *config.Node) error {
 	cre := nodeConfig.ContainerRuntimeEndpoint
 	if cre == "" {
-		switch {
-		case cfg.Docker:
-			cre = dockershimSock
-		default:
-			cre = containerdSock
-		}
+		cre = containerdSock
 	}
 
 	agentConfDir := filepath.Join(cfg.DataDir, "agent", "etc")

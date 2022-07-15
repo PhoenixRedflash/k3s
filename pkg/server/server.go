@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
-	net2 "net"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,28 +13,27 @@ import (
 	"time"
 
 	"github.com/k3s-io/helm-controller/pkg/helm"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/clientaccess"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/daemons/control"
+	"github.com/k3s-io/k3s/pkg/datadir"
+	"github.com/k3s-io/k3s/pkg/deploy"
+	"github.com/k3s-io/k3s/pkg/node"
+	"github.com/k3s-io/k3s/pkg/nodepassword"
+	"github.com/k3s-io/k3s/pkg/rootlessports"
+	"github.com/k3s-io/k3s/pkg/secretsencrypt"
+	"github.com/k3s-io/k3s/pkg/servicelb"
+	"github.com/k3s-io/k3s/pkg/static"
+	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/apiaddresses"
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	"github.com/rancher/k3s/pkg/clientaccess"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/k3s/pkg/daemons/control"
-	"github.com/rancher/k3s/pkg/datadir"
-	"github.com/rancher/k3s/pkg/deploy"
-	"github.com/rancher/k3s/pkg/node"
-	"github.com/rancher/k3s/pkg/nodepassword"
-	"github.com/rancher/k3s/pkg/rootlessports"
-	"github.com/rancher/k3s/pkg/servicelb"
-	"github.com/rancher/k3s/pkg/static"
-	"github.com/rancher/k3s/pkg/util"
-	"github.com/rancher/k3s/pkg/version"
 	v1 "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/rancher/wrangler/pkg/leader"
 	"github.com/rancher/wrangler/pkg/resolvehome"
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/net"
 )
 
 const (
@@ -66,6 +64,8 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 	wg.Add(len(config.StartupHooks))
 
 	config.ControlConfig.Runtime.Handler = router(ctx, config, cfg)
+	config.ControlConfig.Runtime.StartupHooksWg = wg
+
 	shArgs := cmds.StartupHookArgs{
 		APIServerReady:  config.ControlConfig.Runtime.APIServerReady,
 		KubeConfigAdmin: config.ControlConfig.Runtime.KubeConfigAdmin,
@@ -81,38 +81,28 @@ func StartServer(ctx context.Context, config *Config, cfg *cmds.Server) error {
 	if config.ControlConfig.DisableAPIServer {
 		go setETCDLabelsAndAnnotations(ctx, config)
 	} else {
-		go startOnAPIServerReady(ctx, wg, config)
+		go startOnAPIServerReady(ctx, config)
 	}
 
-	ip := net2.ParseIP(config.ControlConfig.BindAddress)
-	if ip == nil {
-		hostIP, err := net.ChooseHostInterface()
-		if err == nil {
-			ip = hostIP
-		} else {
-			ip = net2.ParseIP("127.0.0.1")
-		}
-	}
-
-	if err := printTokens(ip.String(), &config.ControlConfig); err != nil {
+	if err := printTokens(&config.ControlConfig); err != nil {
 		return err
 	}
 
 	return writeKubeConfig(config.ControlConfig.Runtime.ServerCA, config)
 }
 
-func startOnAPIServerReady(ctx context.Context, wg *sync.WaitGroup, config *Config) {
+func startOnAPIServerReady(ctx context.Context, config *Config) {
 	select {
 	case <-ctx.Done():
 		return
 	case <-config.ControlConfig.Runtime.APIServerReady:
-		if err := runControllers(ctx, wg, config); err != nil {
+		if err := runControllers(ctx, config); err != nil {
 			logrus.Fatalf("failed to start controllers: %v", err)
 		}
 	}
 }
 
-func runControllers(ctx context.Context, wg *sync.WaitGroup, config *Config) error {
+func runControllers(ctx context.Context, config *Config) error {
 	controlConfig := &config.ControlConfig
 
 	sc, err := NewContext(ctx, controlConfig.Runtime.KubeConfigAdmin)
@@ -120,7 +110,7 @@ func runControllers(ctx context.Context, wg *sync.WaitGroup, config *Config) err
 		return errors.Wrap(err, "failed to create new server context")
 	}
 
-	wg.Wait()
+	controlConfig.Runtime.StartupHooksWg.Wait()
 	if err := stageFiles(ctx, sc, controlConfig); err != nil {
 		return errors.Wrap(err, "failed to stage files")
 	}
@@ -169,7 +159,7 @@ func runControllers(ctx context.Context, wg *sync.WaitGroup, config *Config) err
 		}
 	}
 
-	go setControlPlaneRoleLabel(ctx, sc.Core.Core().V1().Node(), config)
+	go setNodeLabelsAndAnnotations(ctx, sc.Core.Core().V1().Node(), config)
 
 	go setClusterDNSConfig(ctx, config, sc.Core.Core().V1().ConfigMap())
 
@@ -205,6 +195,7 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 
 	if !config.ControlConfig.DisableHelmController {
 		helm.Register(ctx,
+			sc.K8s,
 			sc.Apply,
 			sc.Helm.Helm().V1().HelmChart(),
 			sc.Helm.Helm().V1().HelmChartConfig(),
@@ -223,13 +214,20 @@ func coreControllers(ctx context.Context, sc *Context, config *Config) error {
 		sc.Core.Core().V1().Pod(),
 		sc.Core.Core().V1().Service(),
 		sc.Core.Core().V1().Endpoints(),
+		config.ServiceLBNamespace,
 		!config.DisableServiceLB,
 		config.Rootless); err != nil {
 		return err
 	}
 
-	if err := apiaddresses.Register(ctx, config.ControlConfig.Runtime, sc.Core.Core().V1().Endpoints()); err != nil {
-		return err
+	if config.ControlConfig.EncryptSecrets {
+		if err := secretsencrypt.Register(ctx,
+			sc.K8s,
+			&config.ControlConfig,
+			sc.Core.Core().V1().Node(),
+			sc.Core.Core().V1().Secret()); err != nil {
+			return err
+		}
 	}
 
 	if config.Rootless {
@@ -315,15 +313,10 @@ func HomeKubeConfig(write, rootless bool) (string, error) {
 	return resolvehome.Resolve(datadir.HomeConfig)
 }
 
-func printTokens(advertiseIP string, config *config.Control) error {
+func printTokens(config *config.Control) error {
 	var (
 		nodeFile string
 	)
-
-	if advertiseIP == "" {
-		advertiseIP = "127.0.0.1"
-	}
-
 	if len(config.Runtime.ServerToken) > 0 {
 		p := filepath.Join(config.DataDir, "token")
 		if err := writeToken(config.Runtime.ServerToken, p, config.Runtime.ServerCA); err == nil {
@@ -344,18 +337,21 @@ func printTokens(advertiseIP string, config *config.Control) error {
 	}
 
 	if len(nodeFile) > 0 {
-		printToken(config.SupervisorPort, advertiseIP, "To join node to cluster:", "agent")
+		printToken(config.SupervisorPort, config.BindAddressOrLoopback(true), "To join node to cluster:", "agent")
 	}
 
 	return nil
 }
 
 func writeKubeConfig(certs string, config *Config) error {
-	ip := config.ControlConfig.BindAddress
-	if ip == "" {
-		ip = "127.0.0.1"
+	ip := config.ControlConfig.BindAddressOrLoopback(false)
+	port := config.ControlConfig.HTTPSPort
+	// on servers without a local apiserver, tunnel access via the loadbalancer
+	if config.ControlConfig.DisableAPIServer {
+		ip = config.ControlConfig.Loopback()
+		port = config.ControlConfig.APIServerPort
 	}
-	url := fmt.Sprintf("https://%s:%d", ip, config.ControlConfig.HTTPSPort)
+	url := fmt.Sprintf("https://%s:%d", ip, port)
 	kubeConfig, err := HomeKubeConfig(true, config.Rootless)
 	def := true
 	if err != nil {
@@ -429,16 +425,7 @@ func setupDataDirAndChdir(config *config.Control) error {
 }
 
 func printToken(httpsPort int, advertiseIP, prefix, cmd string) {
-	ip := advertiseIP
-	if ip == "" {
-		hostIP, err := net.ChooseHostInterface()
-		if err != nil {
-			logrus.Errorf("Failed to choose interface: %v", err)
-		}
-		ip = hostIP.String()
-	}
-
-	logrus.Infof("%s %s %s -s https://%s:%d -t ${NODE_TOKEN}", prefix, version.Program, cmd, ip, httpsPort)
+	logrus.Infof("%s %s %s -s https://%s:%d -t ${NODE_TOKEN}", prefix, version.Program, cmd, advertiseIP, httpsPort)
 }
 
 func writeToken(token, file, certs string) error {
@@ -490,7 +477,7 @@ func isSymlink(config string) bool {
 	return false
 }
 
-func setControlPlaneRoleLabel(ctx context.Context, nodes v1.NodeClient, config *Config) error {
+func setNodeLabelsAndAnnotations(ctx context.Context, nodes v1.NodeClient, config *Config) error {
 	if config.DisableAgent || config.ControlConfig.DisableAPIServer {
 		return nil
 	}
@@ -515,18 +502,25 @@ func setControlPlaneRoleLabel(ctx context.Context, nodes v1.NodeClient, config *
 				etcdRoleLabelExists = true
 			}
 		}
-		if v, ok := node.Labels[ControlPlaneRoleLabelKey]; ok && v == "true" && !etcdRoleLabelExists {
-			break
-		}
 		if node.Labels == nil {
 			node.Labels = make(map[string]string)
 		}
-		node.Labels[ControlPlaneRoleLabelKey] = "true"
-		node.Labels[MasterRoleLabelKey] = "true"
+		v, ok := node.Labels[ControlPlaneRoleLabelKey]
+		if !ok || v != "true" || etcdRoleLabelExists {
+			node.Labels[ControlPlaneRoleLabelKey] = "true"
+			node.Labels[MasterRoleLabelKey] = "true"
+		}
+
+		if config.ControlConfig.EncryptSecrets {
+			if err = secretsencrypt.BootstrapEncryptionHashAnnotation(node, config.ControlConfig.Runtime); err != nil {
+				logrus.Infof("Unable to set encryption hash annotation %s", err.Error())
+				break
+			}
+		}
 
 		_, err = nodes.Update(node)
 		if err == nil {
-			logrus.Infof("Control-plane role label has been set successfully on node: %s", nodeName)
+			logrus.Infof("Labels and annotations have been set successfully on node: %s", nodeName)
 			break
 		}
 		select {

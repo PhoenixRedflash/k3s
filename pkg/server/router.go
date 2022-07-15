@@ -16,16 +16,23 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/k3s-io/k3s/pkg/bootstrap"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/generated/clientset/versioned/scheme"
+	"github.com/k3s-io/k3s/pkg/nodepassword"
+	"github.com/k3s-io/k3s/pkg/util"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
 	certutil "github.com/rancher/dynamiclistener/cert"
-	"github.com/rancher/k3s/pkg/bootstrap"
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/k3s/pkg/nodepassword"
-	"github.com/rancher/k3s/pkg/version"
 	coreclient "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 )
 
 const (
@@ -37,34 +44,46 @@ func router(ctx context.Context, config *Config, cfg *cmds.Server) http.Handler 
 	nodeAuth := passwordBootstrap(ctx, config)
 
 	prefix := "/v1-" + version.Program
-	authed := mux.NewRouter()
+	authed := mux.NewRouter().SkipClean(true)
 	authed.Use(authMiddleware(serverConfig, version.Program+":agent"))
-	authed.NotFoundHandler = apiserver(serverConfig.Runtime)
 	authed.Path(prefix + "/serving-kubelet.crt").Handler(servingKubeletCert(serverConfig, serverConfig.Runtime.ServingKubeletKey, nodeAuth))
 	authed.Path(prefix + "/client-kubelet.crt").Handler(clientKubeletCert(serverConfig, serverConfig.Runtime.ClientKubeletKey, nodeAuth))
 	authed.Path(prefix + "/client-kube-proxy.crt").Handler(fileHandler(serverConfig.Runtime.ClientKubeProxyCert, serverConfig.Runtime.ClientKubeProxyKey))
 	authed.Path(prefix + "/client-" + version.Program + "-controller.crt").Handler(fileHandler(serverConfig.Runtime.ClientK3sControllerCert, serverConfig.Runtime.ClientK3sControllerKey))
 	authed.Path(prefix + "/client-ca.crt").Handler(fileHandler(serverConfig.Runtime.ClientCA))
 	authed.Path(prefix + "/server-ca.crt").Handler(fileHandler(serverConfig.Runtime.ServerCA))
+	authed.Path(prefix + "/apiservers").Handler(apiserversHandler(serverConfig))
 	authed.Path(prefix + "/config").Handler(configHandler(serverConfig, cfg))
 	authed.Path(prefix + "/readyz").Handler(readyzHandler(serverConfig))
 
-	nodeAuthed := mux.NewRouter()
-	nodeAuthed.Use(authMiddleware(serverConfig, "system:nodes"))
-	nodeAuthed.Path(prefix + "/connect").Handler(serverConfig.Runtime.Tunnel)
-	nodeAuthed.NotFoundHandler = authed
-
-	serverAuthed := mux.NewRouter()
-	serverAuthed.Use(authMiddleware(serverConfig, version.Program+":server"))
-	serverAuthed.NotFoundHandler = nodeAuthed
-	serverAuthed.Path("/db/info").Handler(nodeAuthed)
-	if serverConfig.Runtime.HTTPBootstrap {
-		serverAuthed.Path(prefix + "/server-bootstrap").Handler(bootstrap.Handler(&serverConfig.Runtime.ControlRuntimeBootstrap))
+	if cfg.DisableAPIServer {
+		authed.NotFoundHandler = apiserverDisabled()
+	} else {
+		authed.NotFoundHandler = apiserver(serverConfig.Runtime)
 	}
 
+	nodeAuthed := mux.NewRouter().SkipClean(true)
+	nodeAuthed.NotFoundHandler = authed
+	nodeAuthed.Use(authMiddleware(serverConfig, user.NodesGroup))
+	nodeAuthed.Path(prefix + "/connect").Handler(serverConfig.Runtime.Tunnel)
+
+	serverAuthed := mux.NewRouter().SkipClean(true)
+	serverAuthed.NotFoundHandler = nodeAuthed
+	serverAuthed.Use(authMiddleware(serverConfig, version.Program+":server"))
+	serverAuthed.Path(prefix + "/encrypt/status").Handler(encryptionStatusHandler(serverConfig))
+	serverAuthed.Path(prefix + "/encrypt/config").Handler(encryptionConfigHandler(ctx, serverConfig))
+	serverAuthed.Path("/db/info").Handler(nodeAuthed)
+	serverAuthed.Path(prefix + "/server-bootstrap").Handler(bootstrapHandler(serverConfig.Runtime))
+
+	systemAuthed := mux.NewRouter().SkipClean(true)
+	systemAuthed.NotFoundHandler = serverAuthed
+	systemAuthed.MethodNotAllowedHandler = serverAuthed
+	systemAuthed.Use(authMiddleware(serverConfig, user.SystemPrivilegedGroup))
+	systemAuthed.Methods(http.MethodConnect).Handler(serverConfig.Runtime.Tunnel)
+
 	staticDir := filepath.Join(serverConfig.DataDir, "static")
-	router := mux.NewRouter()
-	router.NotFoundHandler = serverAuthed
+	router := mux.NewRouter().SkipClean(true)
+	router.NotFoundHandler = systemAuthed
 	router.PathPrefix(staticURL).Handler(serveStatic(staticURL, staticDir))
 	router.Path("/cacerts").Handler(cacerts(serverConfig.Runtime.ServerCA))
 	router.Path("/ping").Handler(ping())
@@ -77,12 +96,33 @@ func apiserver(runtime *config.ControlRuntime) http.Handler {
 		if runtime != nil && runtime.APIServer != nil {
 			runtime.APIServer.ServeHTTP(resp, req)
 		} else {
-			data := []byte("apiserver not ready")
-			resp.WriteHeader(http.StatusInternalServerError)
-			resp.Header().Set("Content-Type", "text/plain")
-			resp.Header().Set("Content-length", strconv.Itoa(len(data)))
-			resp.Write(data)
+			responsewriters.ErrorNegotiated(
+				apierrors.NewServiceUnavailable("apiserver not ready"),
+				scheme.Codecs.WithoutConversion(), schema.GroupVersion{}, resp, req,
+			)
 		}
+	})
+}
+
+func apiserverDisabled() http.Handler {
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		responsewriters.ErrorNegotiated(
+			apierrors.NewServiceUnavailable("apiserver disabled"),
+			scheme.Codecs.WithoutConversion(), schema.GroupVersion{}, resp, req,
+		)
+	})
+}
+
+func bootstrapHandler(runtime *config.ControlRuntime) http.Handler {
+	if runtime.HTTPBootstrap {
+		return bootstrap.Handler(&runtime.ControlRuntimeBootstrap)
+	}
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		logrus.Warnf("Received HTTP bootstrap request from %s, but embedded etcd is not enabled.", req.RemoteAddr)
+		responsewriters.ErrorNegotiated(
+			apierrors.NewBadRequest("etcd disabled"),
+			scheme.Codecs.WithoutConversion(), schema.GroupVersion{}, resp, req,
+		)
 	})
 }
 
@@ -227,7 +267,7 @@ func clientKubeletCert(server *config.Control, keyFile string, auth nodePassBoot
 
 		cert, err := certutil.NewSignedCert(certutil.Config{
 			CommonName:   "system:node:" + nodeName,
-			Organization: []string{"system:nodes"},
+			Organization: []string{user.NodesGroup},
 			Usages:       []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		}, key, caCert[0], caKey)
 		if err != nil {
@@ -267,6 +307,29 @@ func fileHandler(fileName ...string) http.Handler {
 				return
 			}
 			resp.Write(bytes)
+		}
+	})
+}
+
+func apiserversHandler(server *config.Control) http.Handler {
+	var endpointsClient coreclient.EndpointsClient
+	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		var endpoints []string
+		if endpointsClient == nil {
+			if server.Runtime.Core != nil {
+				endpointsClient = server.Runtime.Core.Core().V1().Endpoints()
+			}
+		}
+		if endpointsClient != nil {
+			if endpoint, _ := endpointsClient.Get("default", "kubernetes", metav1.GetOptions{}); endpoint != nil {
+				endpoints = util.GetAddresses(endpoint)
+			}
+		}
+
+		resp.Header().Set("content-type", "application/json")
+		if err := json.NewEncoder(resp).Encode(endpoints); err != nil {
+			logrus.Errorf("Failed to encode apiserver endpoints: %v", err)
+			resp.WriteHeader(http.StatusInternalServerError)
 		}
 	})
 }
@@ -336,8 +399,9 @@ type nodePassBootstrapper func(req *http.Request) (string, int, error)
 
 func passwordBootstrap(ctx context.Context, config *Config) nodePassBootstrapper {
 	runtime := config.ControlConfig.Runtime
+	deferredNodes := map[string]bool{}
 	var secretClient coreclient.SecretClient
-	var once sync.Once
+	var mu sync.Mutex
 
 	return nodePassBootstrapper(func(req *http.Request) (string, int, error) {
 		nodeName, nodePassword, err := getNodeInfo(req)
@@ -351,7 +415,10 @@ func passwordBootstrap(ctx context.Context, config *Config) nodePassBootstrapper
 				secretClient = runtime.Core.Core().V1().Secret()
 			} else if nodeName == os.Getenv("NODE_NAME") {
 				// or verify the password locally and ensure a secret later
-				return verifyLocalPassword(ctx, config, &once, nodeName, nodePassword)
+				return verifyLocalPassword(ctx, config, &mu, deferredNodes, nodeName, nodePassword)
+			} else if config.ControlConfig.DisableAPIServer {
+				// or defer node password verification until an apiserver joins the cluster
+				return verifyRemotePassword(ctx, config, &mu, deferredNodes, nodeName, nodePassword)
 			} else {
 				// or reject the request until the core is ready
 				return "", http.StatusServiceUnavailable, errors.New("runtime core not ready")
@@ -366,7 +433,7 @@ func passwordBootstrap(ctx context.Context, config *Config) nodePassBootstrapper
 	})
 }
 
-func verifyLocalPassword(ctx context.Context, config *Config, once *sync.Once, nodeName, nodePassword string) (string, int, error) {
+func verifyLocalPassword(ctx context.Context, config *Config, mu *sync.Mutex, deferredNodes map[string]bool, nodeName, nodePassword string) (string, int, error) {
 	// use same password file location that the agent creates
 	nodePasswordRoot := "/"
 	if config.Rootless {
@@ -385,29 +452,46 @@ func verifyLocalPassword(ctx context.Context, config *Config, once *sync.Once, n
 		return "", http.StatusForbidden, errors.Wrapf(err, "unable to verify local password for node '%s'", nodeName)
 	}
 
-	// make sure the secret is created when the api server is ready
-	ensureSecret := func() {
-		runtime := config.ControlConfig.Runtime
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(1 * time.Second):
-				if runtime.Core != nil {
-					logrus.Debugf("runtime core has become available, ensuring password secret for node '%s'", nodeName)
-					secretClient := runtime.Core.Core().V1().Secret()
-					if err := nodepassword.Ensure(secretClient, nodeName, nodePassword); err != nil {
-						logrus.Warnf("error ensuring node password secret for pre-validated node '%s': %v", nodeName, err)
-					}
-					return
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, ok := deferredNodes[nodeName]; !ok {
+		deferredNodes[nodeName] = true
+		go ensureSecret(ctx, config, nodeName, nodePassword)
+		logrus.Debugf("Password verified locally for node '%s'", nodeName)
+	}
+
+	return nodeName, http.StatusOK, nil
+}
+
+func verifyRemotePassword(ctx context.Context, config *Config, mu *sync.Mutex, deferredNodes map[string]bool, nodeName, nodePassword string) (string, int, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, ok := deferredNodes[nodeName]; !ok {
+		deferredNodes[nodeName] = true
+		go ensureSecret(ctx, config, nodeName, nodePassword)
+		logrus.Debugf("Password verification deferred for node '%s'", nodeName)
+	}
+
+	return nodeName, http.StatusOK, nil
+}
+
+func ensureSecret(ctx context.Context, config *Config, nodeName, nodePassword string) {
+	runtime := config.ControlConfig.Runtime
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+			if runtime.Core != nil {
+				logrus.Debugf("Runtime core has become available, ensuring password secret for node '%s'", nodeName)
+				secretClient := runtime.Core.Core().V1().Secret()
+				if err := nodepassword.Ensure(secretClient, nodeName, nodePassword); err != nil {
+					logrus.Warnf("Error ensuring node password secret for pre-validated node '%s': %v", nodeName, err)
 				}
+				return
 			}
 		}
 	}
-
-	go once.Do(ensureSecret)
-
-	logrus.Debugf("password verified locally for node '%s'", nodeName)
-
-	return nodeName, http.StatusOK, nil
 }

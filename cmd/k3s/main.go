@@ -9,15 +9,15 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/configfilearg"
+	"github.com/k3s-io/k3s/pkg/data"
+	"github.com/k3s-io/k3s/pkg/datadir"
+	"github.com/k3s-io/k3s/pkg/dataverify"
+	"github.com/k3s-io/k3s/pkg/flock"
+	"github.com/k3s-io/k3s/pkg/untar"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	"github.com/rancher/k3s/pkg/configfilearg"
-	"github.com/rancher/k3s/pkg/data"
-	"github.com/rancher/k3s/pkg/datadir"
-	"github.com/rancher/k3s/pkg/dataverify"
-	"github.com/rancher/k3s/pkg/flock"
-	"github.com/rancher/k3s/pkg/untar"
-	"github.com/rancher/k3s/pkg/version"
 	"github.com/rancher/wrangler/pkg/resolvehome"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
@@ -35,9 +35,12 @@ func main() {
 	}
 
 	etcdsnapshotCommand := internalCLIAction(version.Program+"-"+cmds.EtcdSnapshotCommand, dataDir, os.Args)
+	secretsencryptCommand := internalCLIAction(version.Program+"-"+cmds.SecretsEncryptCommand, dataDir, os.Args)
+	certCommand := internalCLIAction(version.Program+"-"+cmds.CertCommand, dataDir, os.Args)
 
 	// Handle subcommand invocation (k3s server, k3s crictl, etc)
 	app := cmds.NewApp()
+	app.EnableBashCompletion = true
 	app.Commands = []cli.Command{
 		cmds.NewServerCommand(internalCLIAction(version.Program+"-server", dataDir, os.Args)),
 		cmds.NewAgentCommand(internalCLIAction(version.Program+"-agent", dataDir, os.Args)),
@@ -52,6 +55,20 @@ func main() {
 				etcdsnapshotCommand,
 				etcdsnapshotCommand),
 		),
+		cmds.NewSecretsEncryptCommand(secretsencryptCommand,
+			cmds.NewSecretsEncryptSubcommands(
+				secretsencryptCommand,
+				secretsencryptCommand,
+				secretsencryptCommand,
+				secretsencryptCommand,
+				secretsencryptCommand,
+				secretsencryptCommand),
+		),
+		cmds.NewCertCommand(
+			cmds.NewCertSubcommands(
+				certCommand),
+		),
+		cmds.NewCompletionCommand(internalCLIAction(version.Program+"-completion", dataDir, os.Args)),
 	}
 
 	if err := app.Run(os.Args); err != nil && !errors.Is(err, context.Canceled) {
@@ -120,6 +137,10 @@ func externalCLI(cli, dataDir string, args []string) error {
 // internalCLIAction returns a function that will call a K3s internal command, be used as the Action of a cli.Command.
 func internalCLIAction(cmd, dataDir string, args []string) func(ctx *cli.Context) error {
 	return func(ctx *cli.Context) error {
+		// We don't want the Info logs seen when printing the autocomplete script
+		if cmd == "k3s-completion" {
+			logrus.SetLevel(logrus.ErrorLevel)
+		}
 		return stageAndRunCLI(ctx, cmd, dataDir, args)
 	}
 }
@@ -167,13 +188,13 @@ func getAssetAndDir(dataDir string) (string, string) {
 func extract(dataDir string) (string, error) {
 	// first look for global asset folder so we don't create a HOME version if not needed
 	_, dir := getAssetAndDir(datadir.DefaultDataDir)
-	if _, err := os.Stat(filepath.Join(dir, "bin", "containerd")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "bin", "k3s")); err == nil {
 		return dir, nil
 	}
 
 	asset, dir := getAssetAndDir(dataDir)
 	// check if target content already exists
-	if _, err := os.Stat(filepath.Join(dir, "bin", "containerd")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "bin", "k3s")); err == nil {
 		return dir, nil
 	}
 

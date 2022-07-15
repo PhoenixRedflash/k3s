@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/rancher/k3s/pkg/clientaccess"
-	"github.com/rancher/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/clientaccess"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 )
 
 var (
@@ -22,7 +22,7 @@ type Driver interface {
 	Restore(ctx context.Context) error
 	EndpointName() string
 	Snapshot(ctx context.Context, config *config.Control) error
-	StoreSnapshotData(ctx context.Context) error
+	ReconcileSnapshotData(ctx context.Context) error
 	GetMembersClientURLs(ctx context.Context) ([]string, error)
 	RemoveSelf(ctx context.Context) error
 }

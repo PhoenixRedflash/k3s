@@ -6,7 +6,6 @@
 			"revive",
 			"goimports",
 			"misspell",
-			"ineffassign",
 			"gofmt"
 		]
 	},
@@ -16,7 +15,8 @@
 			"contrib",
 			"manifests",
 			"package",
-			"scripts"
+			"scripts",
+			"vendor"
 		],
 		"skip-files": [
 			"/zz_generated_"
@@ -32,6 +32,10 @@
 			{
 				"linters": "revive",
 				"text": "should have comment"
+			},
+			{
+				"linters": "revive",
+				"text": "exported"
 			}
 		]
 	}

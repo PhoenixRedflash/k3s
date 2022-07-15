@@ -1,4 +1,4 @@
-// +build !windows
+//go:build !windows
 
 package syssetup
 
@@ -11,8 +11,8 @@ import (
 	"github.com/google/cadvisor/machine"
 	"github.com/google/cadvisor/utils/sysfs"
 	"github.com/sirupsen/logrus"
+	"k8s.io/component-helpers/node/util/sysctl"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
-	"k8s.io/kubernetes/pkg/util/sysctl"
 )
 
 func loadKernelModule(moduleName string) {

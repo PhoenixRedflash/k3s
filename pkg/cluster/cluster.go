@@ -6,21 +6,20 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/k3s-io/k3s/pkg/clientaccess"
+	"github.com/k3s-io/k3s/pkg/cluster/managed"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
+	"github.com/k3s-io/k3s/pkg/etcd"
+	"github.com/k3s-io/k3s/pkg/util"
 	"github.com/k3s-io/kine/pkg/endpoint"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/clientaccess"
-	"github.com/rancher/k3s/pkg/cluster/managed"
-	"github.com/rancher/k3s/pkg/daemons/config"
-	"github.com/rancher/k3s/pkg/etcd"
 	"github.com/sirupsen/logrus"
 )
 
 type Cluster struct {
 	clientAccessInfo *clientaccess.Info
 	config           *config.Control
-	runtime          *config.ControlRuntime
 	managedDB        managed.Driver
-	etcdConfig       endpoint.ETCDConfig
 	joining          bool
 	storageStarted   bool
 	saveBootstrap    bool
@@ -54,7 +53,8 @@ func (c *Cluster) Start(ctx context.Context) (<-chan struct{}, error) {
 			clientURL.Host = clientURL.Hostname() + ":2379"
 			clientURLs = append(clientURLs, clientURL.String())
 		}
-		etcdProxy, err := etcd.NewETCDProxy(ctx, true, c.config.DataDir, clientURLs[0])
+		IPv6OnlyService, _ := util.IsIPv6OnlyCIDRs(c.config.ServiceIPRanges)
+		etcdProxy, err := etcd.NewETCDProxy(ctx, true, c.config.DataDir, clientURLs[0], IPv6OnlyService)
 		if err != nil {
 			return nil, err
 		}
@@ -64,6 +64,9 @@ func (c *Cluster) Start(ctx context.Context) (<-chan struct{}, error) {
 		if err := c.managedDB.RemoveSelf(ctx); err != nil {
 			logrus.Warnf("Failed to remove this node from etcd members")
 		}
+
+		c.config.Runtime.EtcdConfig.Endpoints = strings.Split(c.config.Datastore.Endpoint, ",")
+		c.config.Runtime.EtcdConfig.TLSConfig = c.config.Datastore.BackendTLSConfig
 
 		return ready, nil
 	}
@@ -85,7 +88,7 @@ func (c *Cluster) Start(ctx context.Context) (<-chan struct{}, error) {
 
 	// if necessary, store bootstrap data to datastore
 	if c.saveBootstrap {
-		if err := c.save(ctx, false); err != nil {
+		if err := Save(ctx, c.config, false); err != nil {
 			return nil, err
 		}
 	}
@@ -99,12 +102,12 @@ func (c *Cluster) Start(ctx context.Context) (<-chan struct{}, error) {
 			for {
 				select {
 				case <-ready:
-					if err := c.save(ctx, false); err != nil {
+					if err := Save(ctx, c.config, false); err != nil {
 						panic(err)
 					}
 
 					if !c.config.EtcdDisableSnapshots {
-						if err := c.managedDB.StoreSnapshotData(ctx); err != nil {
+						if err := c.managedDB.ReconcileSnapshotData(ctx); err != nil {
 							logrus.Errorf("Failed to record snapshots for cluster: %v", err)
 						}
 					}
@@ -139,7 +142,7 @@ func (c *Cluster) startStorage(ctx context.Context) error {
 	// Persist the returned etcd configuration. We decide if we're doing leader election for embedded controllers
 	// based on what the kine wrapper tells us about the datastore. Single-node datastores like sqlite don't require
 	// leader election, while basically all others (etcd, external database, etc) do since they allow multiple servers.
-	c.etcdConfig = etcdConfig
+	c.config.Runtime.EtcdConfig = etcdConfig
 	c.config.Datastore.BackendTLSConfig = etcdConfig.TLSConfig
 	c.config.Datastore.Endpoint = strings.Join(etcdConfig.Endpoints, ",")
 	c.config.NoLeaderElect = !etcdConfig.LeaderElect
@@ -149,7 +152,6 @@ func (c *Cluster) startStorage(ctx context.Context) error {
 // New creates an initial cluster using the provided configuration.
 func New(config *config.Control) *Cluster {
 	return &Cluster{
-		config:  config,
-		runtime: config.Runtime,
+		config: config,
 	}
 }

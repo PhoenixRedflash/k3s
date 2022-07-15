@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package containerd
@@ -8,9 +9,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/rancher/k3s/pkg/agent/templates"
-	util2 "github.com/rancher/k3s/pkg/agent/util"
-	"github.com/rancher/k3s/pkg/daemons/config"
+	"github.com/containerd/containerd"
+	"github.com/k3s-io/k3s/pkg/agent/templates"
+	util2 "github.com/k3s-io/k3s/pkg/agent/util"
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/rancher/wharfie/pkg/registries"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -43,8 +45,9 @@ func setupContainerdConfig(ctx context.Context, cfg *config.Node) error {
 	containerdConfig := templates.ContainerdConfig{
 		NodeConfig:            cfg,
 		DisableCgroup:         true,
+		SystemdCgroup:         false,
 		IsRunningInUserNS:     false,
-		PrivateRegistryConfig: privRegistries.Registry(),
+		PrivateRegistryConfig: privRegistries.Registry,
 	}
 
 	containerdTemplateBytes, err := ioutil.ReadFile(cfg.Containerd.Template)
@@ -86,4 +89,13 @@ func CriConnection(ctx context.Context, address string) (*grpc.ClientConn, error
 	}
 
 	return conn, nil
+}
+
+func Client(address string) (*containerd.Client, error) {
+	addr, _, err := util.GetAddressAndDialer(address)
+	if err != nil {
+		return nil, err
+	}
+
+	return containerd.New(addr)
 }

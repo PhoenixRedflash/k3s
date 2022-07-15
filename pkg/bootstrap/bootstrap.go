@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/k3s-io/k3s/pkg/daemons/config"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/daemons/config"
 	"github.com/sirupsen/logrus"
 )
 
@@ -67,28 +67,26 @@ type PathsDataformat map[string]File
 
 // WriteToDiskFromStorage writes the contents of the given reader to the paths
 // derived from within the ControlRuntimeBootstrap.
-func WriteToDiskFromStorage(r io.Reader, bootstrap *config.ControlRuntimeBootstrap) error {
+func WriteToDiskFromStorage(files PathsDataformat, bootstrap *config.ControlRuntimeBootstrap) error {
 	paths, err := ObjToMap(bootstrap)
 	if err != nil {
 		return err
 	}
 
-	files := make(PathsDataformat)
-	if err := json.NewDecoder(r).Decode(&files); err != nil {
-		return err
-	}
-
 	for pathKey, bsf := range files {
 		path, ok := paths[pathKey]
-		if !ok {
+		if !ok || path == "" {
 			continue
 		}
 
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			return errors.Wrapf(err, "failed to mkdir %s", filepath.Dir(path))
 		}
-		if err := ioutil.WriteFile(path, bsf.Content, 0600); err != nil {
+		if err := os.WriteFile(path, bsf.Content, 0600); err != nil {
 			return errors.Wrapf(err, "failed to write to %s", path)
+		}
+		if err := os.Chtimes(path, bsf.Timestamp, bsf.Timestamp); err != nil {
+			return errors.Wrapf(err, "failed to update modified time on %s", path)
 		}
 	}
 

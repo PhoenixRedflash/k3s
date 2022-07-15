@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rancher/k3s/pkg/version"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/urfave/cli"
 )
 
@@ -47,6 +47,7 @@ type Server struct {
 	KubeConfigMode           string
 	TLSSan                   cli.StringSlice
 	BindAddress              string
+	EnablePProf              bool
 	ExtraAPIArgs             cli.StringSlice
 	ExtraEtcdArgs            cli.StringSlice
 	ExtraSchedulerArgs       cli.StringSlice
@@ -62,6 +63,8 @@ type Server struct {
 	DisableScheduler         bool
 	ServerURL                string
 	FlannelBackend           string
+	FlannelIPv6Masq          bool
+	EgressSelectorMode       string
 	DefaultLocalStoragePath  string
 	DisableCCM               bool
 	DisableNPC               bool
@@ -74,6 +77,9 @@ type Server struct {
 	ClusterReset             bool
 	ClusterResetRestorePath  string
 	EncryptSecrets           bool
+	EncryptForce             bool
+	EncryptOutput            string
+	EncryptSkip              bool
 	SystemDefaultRegistry    string
 	StartupHooks             []StartupHook
 	EtcdSnapshotName         string
@@ -82,6 +88,8 @@ type Server struct {
 	EtcdSnapshotDir          string
 	EtcdSnapshotCron         string
 	EtcdSnapshotRetention    int
+	EtcdSnapshotCompress     bool
+	EtcdListFormat           string
 	EtcdS3                   bool
 	EtcdS3Endpoint           string
 	EtcdS3EndpointCA         string
@@ -93,11 +101,23 @@ type Server struct {
 	EtcdS3Folder             string
 	EtcdS3Timeout            time.Duration
 	EtcdS3Insecure           bool
+	ServiceLBNamespace       string
 }
 
 var (
 	ServerConfig Server
-	ClusterCIDR  = cli.StringSliceFlag{
+	DataDirFlag  = cli.StringFlag{
+		Name:        "data-dir,d",
+		Usage:       "(data) Folder to hold state default /var/lib/rancher/" + version.Program + " or ${HOME}/.rancher/" + version.Program + " if not root",
+		Destination: &ServerConfig.DataDir,
+	}
+	ServerToken = cli.StringFlag{
+		Name:        "token,t",
+		Usage:       "(cluster) Shared secret used to join a server or agent to a cluster",
+		Destination: &ServerConfig.Token,
+		EnvVar:      version.ProgramUpper + "_TOKEN",
+	}
+	ClusterCIDR = cli.StringSliceFlag{
 		Name:  "cluster-cidr",
 		Usage: "(networking) IPv4/IPv6 network CIDRs to use for pod IPs (default: 10.42.0.0/16)",
 		Value: &ServerConfig.ClusterCIDR,
@@ -179,11 +199,7 @@ var ServerFlags = []cli.Flag{
 		Usage: "(listener) Add additional hostnames or IPv4/IPv6 addresses as Subject Alternative Names on the server TLS cert",
 		Value: &ServerConfig.TLSSan,
 	},
-	cli.StringFlag{
-		Name:        "data-dir,d",
-		Usage:       "(data) Folder to hold state default /var/lib/rancher/" + version.Program + " or ${HOME}/.rancher/" + version.Program + " if not root",
-		Destination: &ServerConfig.DataDir,
-	},
+	DataDirFlag,
 	ClusterCIDR,
 	ServiceCIDR,
 	ServiceNodePortRange,
@@ -191,16 +207,28 @@ var ServerFlags = []cli.Flag{
 	ClusterDomain,
 	cli.StringFlag{
 		Name:        "flannel-backend",
-		Usage:       "(networking) One of 'none', 'vxlan', 'ipsec', 'host-gw', or 'wireguard'",
+		Usage:       "(networking) backend<=option1=val1,option2=val2> where backend is one of 'none', 'vxlan', 'ipsec', 'host-gw', 'wireguard-native', or 'wireguard' (deprecated)",
 		Destination: &ServerConfig.FlannelBackend,
 		Value:       "vxlan",
 	},
-	cli.StringFlag{
-		Name:        "token,t",
-		Usage:       "(cluster) Shared secret used to join a server or agent to a cluster",
-		Destination: &ServerConfig.Token,
-		EnvVar:      version.ProgramUpper + "_TOKEN",
+	cli.BoolFlag{
+		Name:        "flannel-ipv6-masq",
+		Usage:       "(networking) Enable IPv6 masquerading for pod",
+		Destination: &ServerConfig.FlannelIPv6Masq,
 	},
+	cli.StringFlag{
+		Name:        "egress-selector-mode",
+		Usage:       "(networking) One of 'agent', cluster', 'pod', 'disabled'",
+		Destination: &ServerConfig.EgressSelectorMode,
+		Value:       "agent",
+	},
+	cli.StringFlag{
+		Name:        "servicelb-namespace",
+		Usage:       "(networking) Namespace of the pods for the servicelb component",
+		Destination: &ServerConfig.ServiceLBNamespace,
+		Value:       "kube-system",
+	},
+	ServerToken,
 	cli.StringFlag{
 		Name:        "token-file",
 		Usage:       "(cluster) File containing the cluster-secret/token",
@@ -218,6 +246,11 @@ var ServerFlags = []cli.Flag{
 		Usage:       "(client) Write kubeconfig with this mode",
 		Destination: &ServerConfig.KubeConfigMode,
 		EnvVar:      version.ProgramUpper + "_KUBECONFIG_MODE",
+	},
+	cli.BoolFlag{
+		Name:        "enable-pprof",
+		Usage:       "(experimental) Enable pprof endpoint on supervisor port",
+		Destination: &ServerConfig.EnablePProf,
 	},
 	ExtraAPIArgs,
 	ExtraEtcdArgs,
@@ -286,6 +319,11 @@ var ServerFlags = []cli.Flag{
 		Destination: &ServerConfig.EtcdSnapshotDir,
 	},
 	&cli.BoolFlag{
+		Name:        "etcd-snapshot-compress",
+		Usage:       "(db) Compress etcd snapshot",
+		Destination: &ServerConfig.EtcdSnapshotCompress,
+	},
+	&cli.BoolFlag{
 		Name:        "etcd-s3",
 		Usage:       "(db) Enable backup to S3",
 		Destination: &ServerConfig.EtcdS3,
@@ -343,7 +381,7 @@ var ServerFlags = []cli.Flag{
 		Name:        "etcd-s3-timeout",
 		Usage:       "(db) S3 timeout",
 		Destination: &ServerConfig.EtcdS3Timeout,
-		Value:       30 * time.Second,
+		Value:       5 * time.Minute,
 	},
 	cli.StringFlag{
 		Name:        "default-local-storage-path",
@@ -414,6 +452,7 @@ var ServerFlags = []cli.Flag{
 	ResolvConfFlag,
 	FlannelIfaceFlag,
 	FlannelConfFlag,
+	FlannelCniConfFileFlag,
 	ExtraKubeletArgs,
 	ExtraKubeProxyArgs,
 	ProtectKernelDefaultsFlag,
@@ -510,7 +549,7 @@ func NewServerCommand(action func(*cli.Context) error) cli.Command {
 		Name:      "server",
 		Usage:     "Run management server",
 		UsageText: appName + " server [OPTIONS]",
-		Before:    SetupDebug(CheckSELinuxFlags),
+		Before:    CheckSELinuxFlags,
 		Action:    action,
 		Flags:     ServerFlags,
 	}

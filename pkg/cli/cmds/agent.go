@@ -4,8 +4,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
-	"github.com/rancher/k3s/pkg/version"
 	"github.com/urfave/cli"
 )
 
@@ -14,7 +14,7 @@ type Agent struct {
 	TokenFile                string
 	ClusterSecret            string
 	ServerURL                string
-	APIAddressCh             chan string
+	APIAddressCh             chan []string
 	DisableLoadBalancer      bool
 	DisableServiceLB         bool
 	ETCDAgent                bool
@@ -31,6 +31,7 @@ type Agent struct {
 	NoFlannel                bool
 	FlannelIface             string
 	FlannelConf              string
+	FlannelCniConfFile       string
 	Debug                    bool
 	Rootless                 bool
 	RootlessAlreadyUnshared  bool
@@ -56,9 +57,15 @@ type AgentShared struct {
 }
 
 var (
-	appName     = filepath.Base(os.Args[0])
-	AgentConfig Agent
-	NodeIPFlag  = cli.StringSliceFlag{
+	appName        = filepath.Base(os.Args[0])
+	AgentConfig    Agent
+	AgentTokenFlag = cli.StringFlag{
+		Name:        "token,t",
+		Usage:       "(cluster) Token to use for authentication",
+		EnvVar:      version.ProgramUpper + "_TOKEN",
+		Destination: &AgentConfig.Token,
+	}
+	NodeIPFlag = cli.StringSliceFlag{
 		Name:  "node-ip,i",
 		Usage: "(agent/networking) IPv4/IPv6 addresses to advertise for node",
 		Value: &AgentConfig.NodeIP,
@@ -80,8 +87,9 @@ var (
 		Destination: &AgentConfig.WithNodeID,
 	}
 	DockerFlag = cli.BoolFlag{
+		Hidden:      true,
 		Name:        "docker",
-		Usage:       "(agent/runtime) Use docker instead of containerd",
+		Usage:       "(deprecated) (agent/runtime) Use docker instead of containerd",
 		Destination: &AgentConfig.Docker,
 	}
 	CRIEndpointFlag = cli.StringFlag{
@@ -103,7 +111,7 @@ var (
 	}
 	PauseImageFlag = cli.StringFlag{
 		Name:        "pause-image",
-		Usage:       "(agent/runtime) Customized pause image for containerd or docker sandbox",
+		Usage:       "(agent/runtime) Customized pause image for containerd sandbox",
 		Destination: &AgentConfig.PauseImage,
 		Value:       DefaultPauseImage,
 	}
@@ -127,6 +135,11 @@ var (
 		Name:        "flannel-conf",
 		Usage:       "(agent/networking) Override default flannel config file",
 		Destination: &AgentConfig.FlannelConf,
+	}
+	FlannelCniConfFileFlag = cli.StringFlag{
+		Name:        "flannel-cni-conf",
+		Usage:       "(agent/networking) Override default flannel cni config file",
+		Destination: &AgentConfig.FlannelCniConfFile,
 	}
 	ResolvConfFlag = cli.StringFlag{
 		Name:        "resolv-conf",
@@ -179,14 +192,12 @@ var (
 	SELinuxFlag = cli.BoolFlag{
 		Name:        "selinux",
 		Usage:       "(agent/node) Enable SELinux in containerd",
-		Hidden:      false,
 		Destination: &AgentConfig.EnableSELinux,
 		EnvVar:      version.ProgramUpper + "_SELINUX",
 	}
 	LBServerPortFlag = cli.IntFlag{
 		Name:        "lb-server-port",
 		Usage:       "(agent/node) Local port for supervisor client load-balancer. If the supervisor and apiserver are not colocated an additional port 1 less than this port will also be used for the apiserver client load-balancer.",
-		Hidden:      false,
 		Destination: &AgentConfig.LBServerPort,
 		EnvVar:      version.ProgramUpper + "_LB_SERVER_PORT",
 		Value:       6444,
@@ -208,7 +219,7 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 		Name:      "agent",
 		Usage:     "Run node agent",
 		UsageText: appName + " agent [OPTIONS]",
-		Before:    SetupDebug(CheckSELinuxFlags),
+		Before:    CheckSELinuxFlags,
 		Action:    action,
 		Flags: []cli.Flag{
 			ConfigFlag,
@@ -217,12 +228,7 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 			VModule,
 			LogFile,
 			AlsoLogToStderr,
-			cli.StringFlag{
-				Name:        "token,t",
-				Usage:       "(cluster) Token to use for authentication",
-				EnvVar:      version.ProgramUpper + "_TOKEN",
-				Destination: &AgentConfig.Token,
-			},
+			AgentTokenFlag,
 			cli.StringFlag{
 				Name:        "token-file",
 				Usage:       "(cluster) Token file to use for authentication",
@@ -258,6 +264,7 @@ func NewAgentCommand(action func(ctx *cli.Context) error) cli.Command {
 			ResolvConfFlag,
 			FlannelIfaceFlag,
 			FlannelConfFlag,
+			FlannelCniConfFileFlag,
 			ExtraKubeletArgs,
 			ExtraKubeProxyArgs,
 			ProtectKernelDefaultsFlag,

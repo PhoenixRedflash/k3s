@@ -5,10 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	. "github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/reporters"
+	testutil "github.com/k3s-io/k3s/tests/integration"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	testutil "github.com/rancher/k3s/tests/util"
 )
 
 var customEtcdArgsServer *testutil.K3sServer
@@ -16,9 +15,13 @@ var customEtcdArgsServerArgs = []string{
 	"--cluster-init",
 	"--etcd-arg quota-backend-bytes=858993459",
 }
+var testLock int
+
 var _ = BeforeSuite(func() {
 	if !testutil.IsExistingServer() {
 		var err error
+		testLock, err = testutil.K3sTestLock()
+		Expect(err).ToNot(HaveOccurred())
 		customEtcdArgsServer, err = testutil.K3sStartServer(customEtcdArgsServerArgs...)
 		Expect(err).ToNot(HaveOccurred())
 	}
@@ -52,12 +55,11 @@ var _ = Describe("custom etcd args", func() {
 var _ = AfterSuite(func() {
 	if !testutil.IsExistingServer() {
 		Expect(testutil.K3sKillServer(customEtcdArgsServer)).To(Succeed())
+		Expect(testutil.K3sCleanup(testLock, "")).To(Succeed())
 	}
 })
 
 func Test_IntegrationCustomEtcdArgs(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecsWithDefaultAndCustomReporters(t, "Custom etcd Arguments", []Reporter{
-		reporters.NewJUnitReporter("/tmp/results/junit-ls.xml"),
-	})
+	RunSpecs(t, "Custom etcd Arguments")
 }

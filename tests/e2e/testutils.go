@@ -1,16 +1,13 @@
 package e2e
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
-	"time"
-
-	"golang.org/x/crypto/ssh"
 )
 
 type Node struct {
@@ -31,84 +28,6 @@ type Pod struct {
 	Node      string
 }
 
-var config *ssh.ClientConfig
-var SSHKEY string
-var SSHUSER string
-var err error
-
-func checkError(e error) {
-	if e != nil {
-		log.Fatal(err)
-		panic(e)
-	}
-}
-
-func publicKey(path string) ssh.AuthMethod {
-	key, err := ioutil.ReadFile(path)
-	if err != nil {
-		panic(err)
-	}
-	signer, err := ssh.ParsePrivateKey(key)
-	if err != nil {
-		panic(err)
-	}
-	return ssh.PublicKeys(signer)
-}
-
-func ConfigureSSH(host string, SSHUser string, SSHKey string) *ssh.Client {
-	config = &ssh.ClientConfig{
-		User: SSHUser,
-		Auth: []ssh.AuthMethod{
-			publicKey(SSHKey),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
-	conn, err := ssh.Dial("tcp", host, config)
-	checkError(err)
-	return conn
-}
-
-func runsshCommand(cmd string, conn *ssh.Client) string {
-	session, err := conn.NewSession()
-	if err != nil {
-		panic(err)
-	}
-	defer session.Close()
-	var stdoutBuf bytes.Buffer
-	var stderrBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	session.Stderr = &stderrBuf
-
-	if err := session.Run(cmd); err != nil {
-		log.Println(session.Stdout)
-		log.Fatal("Error on command execution", err.Error())
-	}
-	return fmt.Sprintf("%s", stdoutBuf.String())
-}
-
-//Runs command passed from within the node ServerIP
-func RunCmdOnNode(cmd string, ServerIP string, SSHUser string, SSHKey string) string {
-	Server := ServerIP + ":22"
-	conn := ConfigureSSH(Server, SSHUser, SSHKey)
-	res := runsshCommand(cmd, conn)
-	res = strings.TrimSpace(res)
-	return res
-}
-
-// RunCommand Runs command on the cluster accessing the cluster through kubeconfig file
-func RunCommand(cmd string) (string, error) {
-	c := exec.Command("bash", "-c", cmd)
-	time.Sleep(10 * time.Second)
-	var out bytes.Buffer
-	c.Stdout = &out
-	err := c.Run()
-	if err != nil {
-		return "", errors.New(fmt.Sprintf("%s", err))
-	}
-	return out.String(), nil
-}
-
-//Used to count the pods using prefix passed in the list of pods
 func CountOfStringInSlice(str string, pods []Pod) int {
 	count := 0
 	for _, pod := range pods {
@@ -119,115 +38,233 @@ func CountOfStringInSlice(str string, pods []Pod) int {
 	return count
 }
 
-func DeployWorkload(workload string, kubeconfig string) (string, error) {
-	cmd := "kubectl apply -f " + workload + " --kubeconfig=" + kubeconfig
+func CreateCluster(nodeOS string, serverCount, agentCount int) ([]string, []string, error) {
+	serverNodeNames := make([]string, serverCount)
+	for i := 0; i < serverCount; i++ {
+		serverNodeNames[i] = "server-" + strconv.Itoa(i)
+	}
+	agentNodeNames := make([]string, agentCount)
+	for i := 0; i < agentCount; i++ {
+		agentNodeNames[i] = "agent-" + strconv.Itoa(i)
+	}
+	nodeRoles := strings.Join(serverNodeNames, " ") + " " + strings.Join(agentNodeNames, " ")
+
+	nodeRoles = strings.TrimSpace(nodeRoles)
+	nodeBoxes := strings.Repeat(nodeOS+" ", serverCount+agentCount)
+	nodeBoxes = strings.TrimSpace(nodeBoxes)
+
+	var testOptions string
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "E2E_") {
+			testOptions += " " + env
+		}
+	}
+
+	cmd := fmt.Sprintf(`E2E_NODE_ROLES="%s" E2E_NODE_BOXES="%s" %s vagrant up &> vagrant.log`, nodeRoles, nodeBoxes, testOptions)
+	fmt.Println(cmd)
+	if _, err := RunCommand(cmd); err != nil {
+		fmt.Println("Error Creating Cluster", err)
+		return nil, nil, err
+	}
+	return serverNodeNames, agentNodeNames, nil
+}
+
+func DeployWorkload(workload, kubeconfig string, arch bool) (string, error) {
+	resourceDir := "../amd64_resource_files"
+	if arch {
+		resourceDir = "../arm64_resource_files"
+	}
+	files, err := ioutil.ReadDir(resourceDir)
+	if err != nil {
+		err = fmt.Errorf("%s : Unable to read resource manifest file for %s", err, workload)
+		return "", err
+	}
+	fmt.Println("\nDeploying", workload)
+	for _, f := range files {
+		filename := filepath.Join(resourceDir, f.Name())
+		if strings.TrimSpace(f.Name()) == workload {
+			cmd := "kubectl apply -f " + filename + " --kubeconfig=" + kubeconfig
+			return RunCommand(cmd)
+		}
+	}
+	return "", nil
+}
+
+func DestroyCluster() error {
+	if _, err := RunCommand("vagrant destroy -f"); err != nil {
+		return err
+	}
+	return os.Remove("vagrant.log")
+}
+
+func FetchClusterIP(kubeconfig string, servicename string, dualStack bool) (string, error) {
+	if dualStack {
+		cmd := "kubectl get svc " + servicename + " -o jsonpath='{.spec.clusterIPs}' --kubeconfig=" + kubeconfig
+		res, err := RunCommand(cmd)
+		if err != nil {
+			return res, err
+		}
+		res = strings.ReplaceAll(res, "\"", "")
+		return strings.Trim(res, "[]"), nil
+	}
+	cmd := "kubectl get svc " + servicename + " -o jsonpath='{.spec.clusterIP}' --kubeconfig=" + kubeconfig
 	return RunCommand(cmd)
 }
 
-func FetchClusterIP(kubeconfig string, servicename string) string {
-	cmd := "kubectl get svc " + servicename + " -o jsonpath='{.spec.clusterIP}' --kubeconfig=" + kubeconfig
-	res, _ := RunCommand(cmd)
-	return res
-}
-
-func FetchNodeExternalIP(kubeconfig string) []string {
-	cmd := "kubectl get node --output=jsonpath='{range .items[*]} { .status.addresses[?(@.type==\"ExternalIP\")].address}' --kubeconfig=" + kubeconfig
-	time.Sleep(10 * time.Second)
-	res, _ := RunCommand(cmd)
-	nodeExternalIP := strings.Trim(res, " ")
-	nodeExternalIPs := strings.Split(nodeExternalIP, " ")
-	return nodeExternalIPs
-}
-func FetchIngressIP(kubeconfig string) []string {
+func FetchIngressIP(kubeconfig string) ([]string, error) {
 	cmd := "kubectl get ing  ingress  -o jsonpath='{.status.loadBalancer.ingress[*].ip}' --kubeconfig=" + kubeconfig
-	time.Sleep(10 * time.Second)
-	res, _ := RunCommand(cmd)
-
-	ingressIp := strings.Trim(res, " ")
-	ingressIps := strings.Split(ingressIp, " ")
-	return ingressIps
+	res, err := RunCommand(cmd)
+	if err != nil {
+		return nil, err
+	}
+	ingressIP := strings.Trim(res, " ")
+	ingressIPs := strings.Split(ingressIP, " ")
+	return ingressIPs, nil
 }
 
-func ParseNode(kubeconfig string, printres bool) []Node {
-	nodes := make([]Node, 0, 10)
-	var node Node
-	timeElapsed := 0
-	nodeList := ""
-	time.Sleep(60 * time.Second)
-	for timeElapsed < 420 {
-		notReady := false
-		cmd := "kubectl get nodes --no-headers -o wide -A --kubeconfig=" + kubeconfig
-		res, _ := RunCommand(cmd)
-		res = strings.TrimSpace(res)
-		nodeList = res
-		split := strings.Split(res, "\n")
-		for _, rec := range split {
-			fields := strings.Fields(string(rec))
-			node.Name = fields[0]
-			node.Status = fields[1]
-			node.Roles = fields[2]
-			node.InternalIP = fields[5]
-			node.ExternalIP = fields[6]
-			nodes = append(nodes, node)
-			if node.Status != "Ready" {
-				notReady = true
-				break
-			}
-		}
-		if notReady == false {
-			break
-		}
-		time.Sleep(5 * time.Second)
-		timeElapsed = timeElapsed + 10
+func FetchNodeExternalIP(nodename string) (string, error) {
+	cmd := "vagrant ssh " + nodename + " -c  \"ip -f inet addr show eth1| awk '/inet / {print $2}'|cut -d/ -f1\""
+	ipaddr, err := RunCommand(cmd)
+	if err != nil {
+		return "", err
 	}
-	if printres {
+	ips := strings.Trim(ipaddr, "")
+	ip := strings.Split(ips, "inet")
+	nodeip := strings.TrimSpace(ip[1])
+	return nodeip, nil
+}
+
+func GenKubeConfigFile(serverName string) (string, error) {
+	cmd := fmt.Sprintf("vagrant ssh %s -c \"sudo cat /etc/rancher/k3s/k3s.yaml\"", serverName)
+	kubeConfig, err := RunCommand(cmd)
+	if err != nil {
+		return "", err
+	}
+	nodeIP, err := FetchNodeExternalIP(serverName)
+	if err != nil {
+		return "", err
+	}
+	kubeConfig = strings.Replace(kubeConfig, "127.0.0.1", nodeIP, 1)
+	kubeConfigFile := fmt.Sprintf("kubeconfig-%s", serverName)
+	if err := os.WriteFile(kubeConfigFile, []byte(kubeConfig), 0644); err != nil {
+		return "", err
+	}
+	return kubeConfigFile, nil
+}
+
+func GetVagrantLog() string {
+	log, err := os.Open("vagrant.log")
+	if err != nil {
+		return err.Error()
+	}
+	bytes, err := ioutil.ReadAll(log)
+	if err != nil {
+		return err.Error()
+	}
+	return string(bytes)
+}
+
+func ParseNodes(kubeConfig string, print bool) ([]Node, error) {
+	nodes := make([]Node, 0, 10)
+	nodeList := ""
+
+	cmd := "kubectl get nodes --no-headers -o wide -A --kubeconfig=" + kubeConfig
+	res, err := RunCommand(cmd)
+
+	if err != nil {
+		return nil, err
+	}
+	nodeList = strings.TrimSpace(res)
+	split := strings.Split(nodeList, "\n")
+	for _, rec := range split {
+		if strings.TrimSpace(rec) != "" {
+			fields := strings.Fields(rec)
+			node := Node{
+				Name:       fields[0],
+				Status:     fields[1],
+				Roles:      fields[2],
+				InternalIP: fields[5],
+			}
+			if len(fields) > 6 {
+				node.ExternalIP = fields[6]
+			}
+			nodes = append(nodes, node)
+		}
+	}
+	if print {
 		fmt.Println(nodeList)
 	}
-	return nodes
+	return nodes, nil
 }
 
-func ParsePod(kubeconfig string, printres bool) []Pod {
+func ParsePods(kubeconfig string, print bool) ([]Pod, error) {
 	pods := make([]Pod, 0, 10)
-	var pod Pod
-	timeElapsed := 0
-	time.Sleep(60 * time.Second)
 	podList := ""
-	for timeElapsed < 420 {
-		helmPodsNR := false
-		systemPodsNR := false
-		cmd := "kubectl get pods -o wide --no-headers -A --kubeconfig=" + kubeconfig
-		res, _ := RunCommand(cmd)
-		res = strings.TrimSpace(res)
-		podList = res
 
-		split := strings.Split(res, "\n")
-		for _, rec := range split {
-			fields := strings.Fields(string(rec))
-			pod.NameSpace = fields[0]
-			pod.Name = fields[1]
-			pod.Ready = fields[2]
-			pod.Status = fields[3]
-			pod.Restarts = fields[4]
-			pod.NodeIP = fields[6]
-			pod.Node = fields[7]
-			pods = append(pods, pod)
-			if strings.HasPrefix(pod.Name, "helm-install") && pod.Status != "Completed" {
-				helmPodsNR = true
-				break
-			} else if !strings.HasPrefix(pod.Name, "helm-install") && pod.Status != "Running" {
+	cmd := "kubectl get pods -o wide --no-headers -A --kubeconfig=" + kubeconfig
+	res, _ := RunCommand(cmd)
+	res = strings.TrimSpace(res)
+	podList = res
 
-				systemPodsNR = true
-				break
-			}
-			time.Sleep(10 * time.Second)
-			timeElapsed = timeElapsed + 10
+	split := strings.Split(res, "\n")
+	for _, rec := range split {
+		fields := strings.Fields(string(rec))
+		pod := Pod{
+			NameSpace: fields[0],
+			Name:      fields[1],
+			Ready:     fields[2],
+			Status:    fields[3],
+			Restarts:  fields[4],
+			NodeIP:    fields[6],
+			Node:      fields[7],
 		}
-		if systemPodsNR == false && helmPodsNR == false {
-			break
-		}
+		pods = append(pods, pod)
 	}
-	if printres {
+	if print {
 		fmt.Println(podList)
 	}
-	return pods
+	return pods, nil
+}
+
+// RestartCluster restarts the k3s service on each node given
+func RestartCluster(nodeNames []string) error {
+	for _, nodeName := range nodeNames {
+		cmd := "sudo systemctl restart k3s"
+		if _, err := RunCmdOnNode(cmd, nodeName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RunCmdOnNode executes a command from within the given node
+func RunCmdOnNode(cmd string, nodename string) (string, error) {
+	runcmd := "vagrant ssh -c \"" + cmd + "\" " + nodename
+	return RunCommand(runcmd)
+}
+
+// RunCommand executes a command on the host
+func RunCommand(cmd string) (string, error) {
+	c := exec.Command("bash", "-c", cmd)
+	out, err := c.CombinedOutput()
+	return string(out), err
+}
+
+func UpgradeCluster(serverNodeNames []string, agentNodeNames []string) error {
+	for _, nodeName := range serverNodeNames {
+		cmd := "RELEASE_CHANNEL=commit vagrant provision " + nodeName
+		fmt.Println(cmd)
+		if out, err := RunCommand(cmd); err != nil {
+			fmt.Println("Error Upgrading Cluster", out)
+			return err
+		}
+	}
+	for _, nodeName := range agentNodeNames {
+		cmd := "RELEASE_CHANNEL=commit vagrant provision " + nodeName
+		if _, err := RunCommand(cmd); err != nil {
+			fmt.Println("Error Upgrading Cluster", err)
+			return err
+		}
+	}
+	return nil
 }

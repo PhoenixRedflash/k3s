@@ -3,7 +3,7 @@ package cmds
 import (
 	"time"
 
-	"github.com/rancher/k3s/pkg/version"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/urfave/cli"
 )
 
@@ -20,16 +20,22 @@ var EtcdSnapshotFlags = []cli.Flag{
 		EnvVar:      version.ProgramUpper + "_NODE_NAME",
 		Destination: &AgentConfig.NodeName,
 	},
-	cli.StringFlag{
-		Name:        "data-dir,d",
-		Usage:       "(data) Folder to hold state default /var/lib/rancher/" + version.Program + " or ${HOME}/.rancher/" + version.Program + " if not root",
-		Destination: &ServerConfig.DataDir,
+	DataDirFlag,
+	&cli.StringFlag{
+		Name:        "dir,etcd-snapshot-dir",
+		Usage:       "(db) Directory to save etcd on-demand snapshot. (default: ${data-dir}/db/snapshots)",
+		Destination: &ServerConfig.EtcdSnapshotDir,
 	},
 	&cli.StringFlag{
 		Name:        "name",
 		Usage:       "(db) Set the base name of the etcd on-demand snapshot (appended with UNIX timestamp).",
 		Destination: &ServerConfig.EtcdSnapshotName,
 		Value:       "on-demand",
+	},
+	&cli.BoolFlag{
+		Name:        "snapshot-compress,etcd-snapshot-compress",
+		Usage:       "(db) Compress etcd snapshot",
+		Destination: &ServerConfig.EtcdSnapshotCompress,
 	},
 	&cli.BoolFlag{
 		Name:        "s3,etcd-s3",
@@ -89,7 +95,7 @@ var EtcdSnapshotFlags = []cli.Flag{
 		Name:        "s3-timeout,etcd-s3-timeout",
 		Usage:       "(db) S3 timeout",
 		Destination: &ServerConfig.EtcdS3Timeout,
-		Value:       30 * time.Second,
+		Value:       5 * time.Minute,
 	},
 }
 
@@ -101,11 +107,7 @@ func NewEtcdSnapshotCommand(action func(*cli.Context) error, subcommands []cli.C
 		SkipArgReorder:  true,
 		Action:          action,
 		Subcommands:     subcommands,
-		Flags: append(EtcdSnapshotFlags, &cli.StringFlag{
-			Name:        "dir,etcd-snapshot-dir",
-			Usage:       "(db) Directory to save etcd on-demand snapshot. (default: ${data-dir}/db/snapshots)",
-			Destination: &ServerConfig.EtcdSnapshotDir,
-		}),
+		Flags:           EtcdSnapshotFlags,
 	}
 }
 
@@ -126,11 +128,15 @@ func NewEtcdSnapshotSubcommands(delete, list, prune, save func(ctx *cli.Context)
 			SkipFlagParsing: false,
 			SkipArgReorder:  true,
 			Action:          list,
-			Flags:           EtcdSnapshotFlags,
+			Flags: append(EtcdSnapshotFlags, &cli.StringFlag{
+				Name:        "o,output",
+				Usage:       "(db) List format. Default: standard. Optional: json",
+				Destination: &ServerConfig.EtcdListFormat,
+			}),
 		},
 		{
 			Name:            "prune",
-			Usage:           "Remove snapshots that exceed the configured retention count",
+			Usage:           "Remove snapshots that match the name prefix that exceed the configured retention count",
 			SkipFlagParsing: false,
 			SkipArgReorder:  true,
 			Action:          prune,
@@ -147,11 +153,7 @@ func NewEtcdSnapshotSubcommands(delete, list, prune, save func(ctx *cli.Context)
 			SkipFlagParsing: false,
 			SkipArgReorder:  true,
 			Action:          save,
-			Flags: append(EtcdSnapshotFlags, &cli.StringFlag{
-				Name:        "dir",
-				Usage:       "(db) Directory to save etcd on-demand snapshot. (default: ${data-dir}/db/snapshots)",
-				Destination: &ServerConfig.EtcdSnapshotDir,
-			}),
+			Flags:           EtcdSnapshotFlags,
 		},
 	}
 }

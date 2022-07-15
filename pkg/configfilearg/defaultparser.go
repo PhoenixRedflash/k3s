@@ -1,13 +1,13 @@
 package configfilearg
 
 import (
-	"github.com/rancher/k3s/pkg/cli/cmds"
-	"github.com/rancher/k3s/pkg/version"
+	"github.com/k3s-io/k3s/pkg/cli/cmds"
+	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
-var defaultParser = &Parser{
+var DefaultParser = &Parser{
 	After:         []string{"server", "agent", "etcd-snapshot:1"},
 	FlagNames:     []string{"--config", "-c"},
 	EnvName:       version.ProgramUpper + "_CONFIG_FILE",
@@ -16,7 +16,7 @@ var defaultParser = &Parser{
 }
 
 func MustParse(args []string) []string {
-	result, err := defaultParser.Parse(args)
+	result, err := DefaultParser.Parse(args)
 	if err != nil {
 		logrus.Fatal(err)
 	}
