@@ -26,6 +26,8 @@ jobs:
     name: Build
     runs-on: ubuntu-20.04
     timeout-minutes: 20
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
     steps:
     - name: "Checkout"
       uses: actions/checkout@v2
@@ -38,6 +40,14 @@ jobs:
       with:
         name: k3s
         path: dist/artifacts/k3s
+    - name: Generate hashes
+        shell: bash
+        id: hash
+        run: |
+          # sha256sum generates sha256 hash for all artifacts.
+          # base64 -w0 encodes to base64 and outputs on a single line.
+          # sha256sum artifact1 artifact2 ... | base64 -w0
+          echo "::set-output name=hashes::$(sha256sum k3s | base64 -w0)"    
   test:
     needs: build
     name: Integration Tests
@@ -73,7 +83,20 @@ jobs:
         files: ./coverage.out
         flags: inttests # optional
         verbose: true # optional (default = false)
-
+  
+  # This step calls the generic workflow to generate provenance.
+  provenance:
+    needs: [build]
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.2.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.hashes }}"
+      # Upload provenance to a new release
+      upload-assets: true
+  
   # generate provenance https://github.com/slsa-framework/github-actions-demo      
   generate-provenance:
     needs: build
